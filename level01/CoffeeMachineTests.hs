@@ -14,6 +14,7 @@ import           Test.Tasty (TestTree)
 import           Test.Tasty.Hedgehog (testProperty)
 
 data DrinkType = Coffee | HotChocolate | Tea
+
 newtype Model (v :: Type -> Type) = Model DrinkType
 
 -- You will need to define data types for the SetDrinkTea and
@@ -23,6 +24,16 @@ data SetDrinkCoffee (v :: Type -> Type) = SetDrinkCoffee deriving Show
 
 instance HTraversable SetDrinkCoffee where
   htraverse _ _ = pure SetDrinkCoffee
+
+data SetDrinkTea (v :: Type -> Type) = SetDrinkTea deriving Show
+
+instance HTraversable SetDrinkTea where
+  htraverse _ _ = pure SetDrinkTea
+
+data SetDrinkHotChocolate (v :: Type -> Type) = SetDrinkHotChocolate deriving Show
+
+instance HTraversable SetDrinkHotChocolate where
+  htraverse _ _ = pure SetDrinkHotChocolate
 
 cSetDrinkCoffee
   :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
@@ -52,13 +63,72 @@ cSetDrinkHotChocolate
   :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
   => C.Machine
   -> Command g m Model
-cSetDrinkHotChocolate = undefined
+cSetDrinkHotChocolate mach = Command gen exec callbacks
+  where
+    gen :: Model Symbolic -> Maybe (g (SetDrinkHotChocolate Symbolic))
+    gen _ = Just $ pure SetDrinkHotChocolate
+
+    exec :: SetDrinkHotChocolate Concrete  -> m C.Drink
+    exec _ = do
+      C.hotChocolate mach
+      view C.drinkSetting <$> C.peek mach
+
+    callbacks :: [Callback SetDrinkHotChocolate C.Drink Model]
+    callbacks =
+      [ Update updateCurrDrink
+      , Ensure currDrinkEnsure
+      ]
+
+    updateCurrDrink
+      :: forall v
+       . Ord1 v
+      => Model v -> SetDrinkHotChocolate v -> Var C.Drink v -> Model v
+    updateCurrDrink _ SetDrinkHotChocolate _ = Model HotChocolate
+
+    currDrinkEnsure ::
+         Model Concrete
+      -> Model Concrete
+      -> SetDrinkHotChocolate Concrete
+      -> C.Drink
+      -> Test ()
+    currDrinkEnsure _ _ _ C.HotChocolate{} = success
+    currDrinkEnsure _ _ _ _ = failure
+
 
 cSetDrinkTea
   :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
   => C.Machine
   -> Command g m Model
-cSetDrinkTea = undefined
+cSetDrinkTea mach = Command gen exec callbacks
+  where
+    gen :: Model Symbolic -> Maybe (g (SetDrinkTea Symbolic))
+    gen _ = Just $ pure SetDrinkTea
+
+    exec :: SetDrinkTea Concrete  -> m C.Drink
+    exec _ = do
+      C.tea mach
+      view C.drinkSetting <$> C.peek mach
+
+    callbacks :: [Callback SetDrinkTea C.Drink Model]
+    callbacks =
+      [ Update updateCurrDrink
+      , Ensure currDrinkEnsure
+      ]
+
+    updateCurrDrink
+      :: forall v
+       . Ord1 v
+      => Model v -> SetDrinkTea v -> Var C.Drink v -> Model v
+    updateCurrDrink _ SetDrinkTea _ = Model Tea
+
+    currDrinkEnsure ::
+         Model Concrete
+      -> Model Concrete
+      -> SetDrinkTea Concrete
+      -> C.Drink
+      -> Test ()
+    currDrinkEnsure _ _ _ C.Tea{} = success
+    currDrinkEnsure _ _ _ _ = failure
 
 stateMachineTests :: TestTree
 stateMachineTests = testProperty "State Machine Tests" . property $ do
