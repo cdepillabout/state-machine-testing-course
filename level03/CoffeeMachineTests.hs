@@ -1,12 +1,14 @@
+{-# LANGUAGE InstanceSigs      #-}
 {-# LANGUAGE KindSignatures      #-}
-{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE RankNTypes      #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
 
 module CoffeeMachineTests (stateMachineTests) where
 
 import qualified CoffeeMachine as C
-import           Control.Lens (makeLenses, to, view, (.~), (^.))
-import           Control.Monad.IO.Class (MonadIO)
+import           Control.Lens (failing, firstOf, makeLenses, to, view, (.~), (^.), (+~))
+import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Data.Function ((&))
 import           Data.Kind (Type)
 import           Data.Maybe (isJust, isNothing)
@@ -36,6 +38,9 @@ $(makeLenses ''Model)
 
 newtype SetDrinkType (v :: Type -> Type) = SetDrinkType DrinkType deriving Show
 
+instance HTraversable SetDrinkType where
+  htraverse _ (SetDrinkType d) = pure $ SetDrinkType d
+
 data AddMug (v :: Type -> Type) = AddMug deriving Show
 data TakeMug (v :: Type -> Type) = TakeMug deriving Show
 
@@ -45,8 +50,23 @@ instance HTraversable AddMug where
 instance HTraversable TakeMug where
   htraverse _ _ = pure TakeMug
 
-instance HTraversable SetDrinkType where
-  htraverse _ (SetDrinkType d) = pure $ SetDrinkType d
+data InsertCoins (v :: Type -> Type) = InsertCoins Int deriving Show
+
+instance HTraversable InsertCoins where
+  htraverse
+    :: Applicative f
+    => (forall a. g a -> f (h a)) -> InsertCoins g -> f (InsertCoins h)
+  htraverse _ (InsertCoins int) = pure $ InsertCoins int
+
+data RefundCoins (v :: Type -> Type) = RefundCoins deriving Show
+
+instance HTraversable RefundCoins where
+  htraverse _ _ = pure RefundCoins
+
+newtype AddMilkSugar (v :: Type -> Type) = AddMilkSugar DrinkAdditive deriving Show
+
+instance HTraversable AddMilkSugar where
+  htraverse _ (AddMilkSugar a) = pure $ AddMilkSugar a
 
 cSetDrinkType
   :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
@@ -115,6 +135,150 @@ cAddMug mach = Command gen exec
       C.addMug mach >>= evalEither
       view C.mug <$> C.peek mach
 
+cInsertCoins
+  :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
+  => C.Machine
+  -> Command g m Model
+cInsertCoins mach = Command gen exec
+  [ Update update
+  , Ensure ensure
+  ]
+  where
+    gen :: MonadGen g => Model Symbolic -> Maybe (g (InsertCoins Symbolic))
+    gen _ = Just $ fmap InsertCoins (Gen.integral $ Range.constantFrom 1 1 10)
+
+    exec :: InsertCoins Concrete -> m Int
+    exec (InsertCoins int) = do
+      C.insertCoins int mach
+      fmap (view C.coins) (C.peek mach)
+
+    update
+      :: forall v
+       . Ord1 v
+      => Model v -> InsertCoins v -> Var Int v -> Model v
+    update model (InsertCoins int) _ = model & modelCoins +~ int
+
+    ensure
+      :: Model Concrete
+      -> Model Concrete
+      -> InsertCoins Concrete
+      -> Int
+      -> Test ()
+    ensure oldModel newModel (InsertCoins int) coinsInMachine = do
+      let oldCoins = oldModel ^. modelCoins
+          newCoins = newModel ^. modelCoins
+      assert $ newCoins > oldCoins
+      assert $ newCoins - oldCoins == int
+      assert $ newCoins == coinsInMachine
+
+cRefundCoins
+  :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
+  => C.Machine
+  -> Command g m Model
+cRefundCoins mach = Command gen exec
+  [ Update update
+  , Ensure ensure
+  ]
+  where
+    gen :: MonadGen g => Model Symbolic -> Maybe (g (RefundCoins Symbolic))
+    gen _ = Just $ pure RefundCoins
+
+    exec
+      :: RefundCoins Concrete
+      -> m (Int, Int)  -- ^ (returned amount, current amount in machine)
+    exec _ = do
+      refundAmount <- C.refund mach
+      amountInMachine <- fmap (view C.coins) (C.peek mach)
+      pure (refundAmount, amountInMachine)
+
+    update
+      :: forall v
+       . Ord1 v
+      => Model v -> RefundCoins v -> Var (Int, Int) v -> Model v
+    update model _ _ = model & modelCoins .~ 0
+
+    ensure
+      :: Model Concrete
+      -> Model Concrete
+      -> RefundCoins Concrete
+      -> (Int, Int)
+      -> Test ()
+    ensure oldModel newModel _ (refundAmount, amountInMachine) = do
+      let oldCoins = oldModel ^. modelCoins
+          newCoins = newModel ^. modelCoins
+      assert $ newCoins == 0
+      assert $ newCoins == amountInMachine
+      assert $ refundAmount == oldCoins
+
+cAddMilkSugar
+  :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
+  => C.Machine
+  -> Command g m Model
+cAddMilkSugar mach = Command gen exec
+  [ Require require
+  , Update update
+  , Ensure ensure
+  ]
+  where
+    gen :: MonadGen g => Model Symbolic -> Maybe (g (AddMilkSugar Symbolic))
+    gen model =
+      case model ^. modelDrinkType of
+        HotChocolate -> Nothing
+        _ ->
+          Just $ do
+            milkOrSugar <- Gen.bool
+            pure $ AddMilkSugar $ if milkOrSugar then Milk else Sugar
+
+    exec
+      :: AddMilkSugar Concrete
+      -> m Int
+    exec (AddMilkSugar additive) = do
+      maybeAdditiveNum <-
+        case additive of
+          Milk -> do
+            C.addMilk mach
+            machState <- C.peek mach
+            pure $
+              firstOf
+                (C.drinkSetting . (C._Coffee `failing` C._Tea) . C.milk)
+                machState
+          Sugar -> do
+            C.addSugar mach
+            machState <- C.peek mach
+            pure $
+              firstOf
+                (C.drinkSetting . (C._Coffee `failing` C._Tea) . C.sugar)
+                machState
+      case maybeAdditiveNum of
+        Nothing -> failure
+        Just additiveNum -> pure additiveNum
+
+    require :: Model Symbolic -> AddMilkSugar Symbolic -> Bool
+    require model _ = (model ^. modelDrinkType) /= HotChocolate
+
+    update
+      :: forall v
+       . Ord1 v
+      => Model v -> AddMilkSugar v -> Var Int v -> Model v
+    update model (AddMilkSugar Milk) _ = model & modelMilk +~ 1
+    update model (AddMilkSugar Sugar) _ = model & modelSugar +~ 1
+
+    ensure
+      :: Model Concrete
+      -> Model Concrete
+      -> AddMilkSugar Concrete
+      -> Int
+      -> Test ()
+    ensure oldModel newModel (AddMilkSugar Milk) milkAmount = do
+      let oldMilkAmount = oldModel ^. modelMilk
+          newMilkAmount = newModel ^. modelMilk
+      assert $ oldMilkAmount + 1 == newMilkAmount
+      assert $ newMilkAmount == milkAmount
+    ensure oldModel newModel (AddMilkSugar Sugar) sugarAmount = do
+      let oldSugarAmount = oldModel ^. modelSugar
+          newSugarAmount = newModel ^. modelSugar
+      assert $ oldSugarAmount + 1 == newSugarAmount
+      assert $ newSugarAmount == sugarAmount
 
 stateMachineTests :: TestTree
 stateMachineTests = testProperty "State Machine Tests" . property $ do
@@ -125,11 +289,12 @@ stateMachineTests = testProperty "State Machine Tests" . property $ do
         [ cSetDrinkType
         , cAddMug
         , cTakeMug
-        -- , cAddMilkSugar
+        , cAddMilkSugar
         -- , cInsertCoins
         -- , cRefundCoins
         ]
 
   actions <- forAll $ Gen.sequential (Range.linear 1 100) initialModel commands
-  C.reset mach
+  liftIO $ print actions
+  -- C.reset mach
   executeSequential initialModel actions
