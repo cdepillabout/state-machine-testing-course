@@ -31,7 +31,8 @@ data Model (v :: Type -> Type) = Model
   , _modelMilk      :: Int
   , _modelSugar     :: Int
   , _modelCoins     :: Int
-  }
+  } deriving (Eq, Show)
+
 $(makeLenses ''Model)
 
 newtype SetDrinkType (v :: Type -> Type) = SetDrinkType DrinkType deriving Show
@@ -110,6 +111,26 @@ cTakeMug mach = Command gen exec
       _ <- C.takeMug mach >>= evalEither
       view C.mug <$> C.peek mach
 
+cTakeMugBad
+  :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
+  => C.Machine
+  -> Command g m Model
+cTakeMugBad mach = Command gen exec
+  [ Require $ \m _input -> m ^. modelHasMug . to not
+  , Ensure $ \startState endState _input _output -> startState === endState
+  ]
+  where
+    gen :: MonadGen g => Model Symbolic -> Maybe (g (TakeMug Symbolic))
+    gen m | _modelHasMug m = Nothing
+          | otherwise = pure $ pure TakeMug
+
+    exec :: TakeMug Concrete -> m ()
+    exec _ = do
+      eitherRes <- C.takeMug mach
+      case eitherRes of
+        Left _ -> success
+        Right _ -> failure
+
 cAddMug
   :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
   => C.Machine
@@ -128,6 +149,26 @@ cAddMug mach = Command gen exec
     exec _ = do
       C.addMug mach >>= evalEither
       view C.mug <$> C.peek mach
+
+cAddMugBad
+  :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
+  => C.Machine
+  -> Command g m Model
+cAddMugBad mach = Command gen exec
+  [ Require $ \m _input -> m ^. modelHasMug
+  , Ensure $ \startState endState _input _output -> startState === endState
+  ]
+  where
+    gen :: MonadGen g => Model Symbolic -> Maybe (g (AddMug Symbolic))
+    gen m | _modelHasMug m = pure $ pure AddMug
+          | otherwise = Nothing
+
+    exec :: AddMug Concrete -> m ()
+    exec _ = do
+      eitherRes <- C.addMug mach
+      case eitherRes of
+        Left _ -> success
+        Right _ -> failure
 
 cAddMilkSugar
   :: forall g m. (MonadGen g, MonadTest m, MonadIO m)
@@ -197,7 +238,9 @@ stateMachineTests = testProperty "State Machine Tests" . property $ do
       commands = ($ mach) <$>
         [ cSetDrinkType
         , cAddMug
+        , cAddMugBad
         , cTakeMug
+        , cTakeMugBad
         , cAddMilkSugar
         , cInsertCoins
         , cRefundCoins
